@@ -1,0 +1,40 @@
+2026-03-16 17:47:14 - INFO - Loading history from: history_1054974644.json
+2026-03-16 17:47:14 - INFO - History file history_1054974644.json does not exist
+2026-03-16 17:47:14 - INFO - Loading history from: history_952761374.json
+2026-03-16 17:47:14 - INFO - History file history_952761374.json does not exist
+2026-03-16 17:47:14 - INFO - Loading history from: history_1394046417.json
+2026-03-16 17:47:14 - INFO - Loaded 8 records
+2026-03-16 17:47:14 - ERROR - Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x000002174F38C5F0>
+2026-03-16 17:52:24 - INFO - Loading history from: history_1054974644.json
+2026-03-16 17:52:24 - INFO - History file history_1054974644.json does not exist
+2026-03-16 17:52:24 - INFO - Loading history from: history_952761374.json
+2026-03-16 17:52:24 - INFO - History file history_952761374.json does not exist
+2026-03-16 17:52:24 - INFO - Loading history from: history_1394046417.json
+2026-03-16 17:52:24 - INFO - Loaded 8 records
+2026-03-16 17:52:25 - ERROR - Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x00000264AF4A69F0>
+2026-03-16 18:33:10 - INFO - Loading history from: history_1054974644.json
+2026-03-16 18:33:10 - INFO - History file history_1054974644.json does not exist
+2026-03-16 18:33:10 - INFO - Loading history from: history_952761374.json
+2026-03-16 18:33:10 - INFO - History file history_952761374.json does not exist
+2026-03-16 18:33:10 - INFO - Loading history from: history_1394046417.json
+2026-03-16 18:33:10 - INFO - Loaded 8 records
+2026-03-16 18:33:10 - ERROR - Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000021325D3E9F0>
+2026-03-16 18:35:57 - INFO - Loading history from: history_1054974644.json
+2026-03-16 18:35:57 - INFO - History file history_1054974644.json does not exist
+2026-03-16 18:35:57 - INFO - Loading history from: history_952761374.json
+2026-03-16 18:35:57 - INFO - History file history_952761374.json does not exist
+2026-03-16 18:35:57 - INFO - Loading history from: history_1394046417.json
+2026-03-16 18:35:57 - INFO - Loaded 8 records
+2026-03-16 18:35:57 - ERROR - Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000026B72E4E9F0>
+2026-03-16 18:43:59 - INFO - Loading history from: history_1054974644.json
+2026-03-16 18:43:59 - INFO - History file history_1054974644.json does not exist
+2026-03-16 18:43:59 - INFO - Loading history from: history_952761374.json
+2026-03-16 18:43:59 - INFO - History file history_952761374.json does not exist
+2026-03-16 18:43:59 - INFO - Loading history from: history_1394046417.json
+2026-03-16 18:43:59 - INFO - Loaded 8 records
+2026-03-16 18:44:00 - ERROR - Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000018CACF6FEF0>

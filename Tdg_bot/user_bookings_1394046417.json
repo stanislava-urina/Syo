@@ -1,0 +1,38 @@
+[
+  {
+    "ticket_number": "T134314",
+    "service_id": "117186a5-218f-44dd-8832-d3015b5c6b09",
+    "service_name": "Замена водительских прав",
+    "created_at": "09.03.2026 13:43",
+    "queue_position": 6,
+    "wait_time": 15,
+    "type": "live",
+    "status": "waiting",
+    "saved_at": "2026-03-09T13:43:14.822985",
+    "booking_id": "booking_1773052994.822985"
+  },
+  {
+    "ticket_number": "B160725",
+    "service_id": "117186a5-218f-44dd-8832-d3015b5c6b09",
+    "service_name": "Замена водительских прав",
+    "booking_datetime": "09.03.2026 16:07",
+    "car_number": "A123BB43",
+    "type": "scheduled",
+    "status": "active",
+    "created_at": "2026-03-09T16:07:25.374939",
+    "booking_id": "booking_1773061645.374939",
+    "saved_at": "2026-03-09T16:07:25.374939"
+  },
+  {
+    "ticket_number": "B160823",
+    "service_id": "d0f12f51-cd57-4a8d-b75c-ae5d79ff5f14",
+    "service_name": "Регистрация ТС",
+    "booking_datetime": "09.03.2026 16:08",
+    "car_number": "FF2222FF",
+    "type": "scheduled",
+    "status": "active",
+    "created_at": "2026-03-09T16:08:23.507083",
+    "booking_id": "booking_1773061703.508082",
+    "saved_at": "2026-03-09T16:08:23.508082"
+  }
+]

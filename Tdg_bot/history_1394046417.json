@@ -1,0 +1,89 @@
+[
+  {
+    "booking_id": "book_1773067318.312687",
+    "type": "запись_на_время",
+    "ticket_number": "B174158",
+    "service_name": "Регистрация ТС",
+    "date_time": "10.03.2026 08:00",
+    "car_number": "П765АП",
+    "status": "активна",
+    "created_at": "09.03.2026 17:41:58"
+  },
+  {
+    "booking_id": "book_1773068767.685966",
+    "type": "запись_на_время",
+    "ticket_number": "А1",
+    "service_name": "Замена водительских прав",
+    "date_time": "10.03.2026 09:00",
+    "car_number": "Р567АР",
+    "categories": [],
+    "status": "активна",
+    "created_at": "09.03.2026 18:06:07"
+  },
+  {
+    "booking_id": "live_1773069515.83896",
+    "type": "живая_очередь",
+    "ticket_number": "T181835",
+    "service_name": "Замена водительских прав",
+    "queue_position": 6,
+    "wait_time": 15,
+    "created_at": "09.03.2026 18:18",
+    "status": "в очереди",
+    "saved_at": "09.03.2026 18:18:35"
+  },
+  {
+    "booking_id": "live_1773069630.834655",
+    "type": "живая_очередь",
+    "ticket_number": "T182030",
+    "service_name": "Замена водительских прав",
+    "queue_position": 6,
+    "wait_time": 15,
+    "created_at": "09.03.2026 18:20",
+    "status": "в очереди",
+    "saved_at": "09.03.2026 18:20:30"
+  },
+  {
+    "booking_id": "book_1773072052.219191",
+    "type": "запись_на_время",
+    "ticket_number": "А2",
+    "service_name": "Регистрация ТС",
+    "date_time": "10.03.2026 08:30",
+    "car_number": "Р123КЕ",
+    "categories": [],
+    "status": "активна",
+    "created_at": "09.03.2026 19:00:52"
+  },
+  {
+    "booking_id": "live_1773072254.358083",
+    "type": "живая_очередь",
+    "ticket_number": "T190414",
+    "service_name": "Замена водительских прав",
+    "queue_position": 6,
+    "wait_time": 15,
+    "created_at": "09.03.2026 19:04",
+    "status": "в очереди",
+    "saved_at": "09.03.2026 19:04:14"
+  },
+  {
+    "booking_id": "live_1773404295.082959",
+    "type": "живая_очередь",
+    "ticket_number": "А1",
+    "service_name": "Оформление доверенности",
+    "queue_position": 2,
+    "wait_time": 30,
+    "created_at": "2026-03-13T15:17:39.452876",
+    "status": "в очереди",
+    "saved_at": "13.03.2026 15:18:15"
+  },
+  {
+    "booking_id": "book_1773404497.645383",
+    "type": "запись_на_время",
+    "ticket_number": "А2",
+    "service_name": "Регистрация ТС",
+    "date_time": "13.03.2026 16:00",
+    "car_number": "В453МИ",
+    "categories": [],
+    "status": "активна",
+    "created_at": "13.03.2026 15:21:37"
+  }
+]
