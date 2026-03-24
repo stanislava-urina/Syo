@@ -12,17 +12,19 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, \
     InlineKeyboardButton
 from aiogram import BaseMiddleware
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from Read import read, read_id, read_simple, write, write_id, remove_from_file
 import requests
 
 import sys
 from logging.handlers import RotatingFileHandler
+from aiohttp import ClientSession, TCPConnector
+from aiogram.client.session.aiohttp import AiohttpSession
 
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s',
                                   datefmt='%Y-%m-%d %H:%M:%S')
 
-file_handler = RotatingFileHandler('bot.log', maxBytes=5*1024*1024, backupCount=5, encoding='utf-8')
+file_handler = RotatingFileHandler('bot.log', maxBytes=5 * 1024 * 1024, backupCount=5, encoding='utf-8')
 file_handler.setFormatter(log_formatter)
 file_handler.setLevel(logging.INFO)
 
@@ -38,6 +40,9 @@ root_logger.addHandler(console_handler)
 logging.getLogger('aiogram').setLevel(logging.WARNING)
 logging.getLogger('aiohttp').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
+
+PROXY_URL = "http://147.161.210.140:8800"
+
 
 def save_booking(user_id: str, booking_data: dict):
     try:
@@ -66,8 +71,9 @@ def save_booking(user_id: str, booking_data: dict):
         logging.info(f"Successfully saved booking. Total records: {len(history)}")
         return True
     except Exception as e:
-        logging.error(f"Ошибка сохранения истории: {e}")
+        logging.error(f"Error saving history: {e}")
         return False
+
 
 def get_user_history(user_id: str):
     try:
@@ -94,20 +100,35 @@ def get_user_history(user_id: str):
         except:
             pass
     except Exception as e:
-        logging.error(f"Ошибка загрузки истории: {e}")
+        logging.error(f"Error loading history: {e}")
     return []
+
+
+def get_user_active_bookings_count(user_id: str):
+    history = get_user_history(user_id)
+    if not history:
+        return 0
+
+    active_count = 0
+    for item in history:
+        if item.get('status') in ['активна', 'в очереди']:
+            active_count += 1
+    return active_count
+
 
 def cancel_booking(user_id: str, booking_id: str):
     try:
         filename = f"history_{user_id}.json"
         if not os.path.exists(filename):
-            return False
+            return False, None
 
         with open(filename, 'r', encoding='utf-8') as f:
             history = json.load(f)
 
+        cancelled_booking = None
         for booking in history:
             if booking.get("booking_id") == booking_id:
+                cancelled_booking = booking.copy()
                 booking["status"] = "отменена"
                 booking["cancelled_at"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
                 break
@@ -115,10 +136,60 @@ def cancel_booking(user_id: str, booking_id: str):
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
 
+        return True, cancelled_booking
+    except Exception as e:
+        logging.error(f"Error cancelling booking: {e}")
+        return False, None
+
+
+def save_user_vehicle(user_id: str, vehicle_data: dict):
+    try:
+        filename = f"vehicles_{user_id}.json"
+
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if content:
+                    vehicles = json.loads(content)
+                else:
+                    vehicles = []
+        else:
+            vehicles = []
+
+        existing_index = None
+        for i, v in enumerate(vehicles):
+            if v.get('number') == vehicle_data.get('number'):
+                existing_index = i
+                break
+
+        if existing_index is not None:
+            vehicles[existing_index] = vehicle_data
+        else:
+            vehicles.append(vehicle_data)
+
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(vehicles, f, ensure_ascii=False, indent=2)
+
         return True
     except Exception as e:
-        logging.error(f"Ошибка отмены записи: {e}")
+        logging.error(f"Error saving vehicle: {e}")
         return False
+
+
+def get_user_vehicles(user_id: str):
+    try:
+        filename = f"vehicles_{user_id}.json"
+
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if content:
+                    return json.loads(content)
+        return []
+    except Exception as e:
+        logging.error(f"Error loading vehicles: {e}")
+        return []
+
 
 class QueueClient:
     def __init__(self, token: str, host: str = "http://api.qms.kn-k.ru"):
@@ -383,11 +454,14 @@ class QueueClient:
 
         return result
 
-BOT_TOKEN = 
-API_TOKEN = 
+
+BOT_TOKEN = ""
+API_TOKEN = ""
 
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=BOT_TOKEN)
+
+session = AiohttpSession(proxy=PROXY_URL) if PROXY_URL else None
+bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
 api = QueueClient(API_TOKEN)
 
@@ -395,32 +469,40 @@ admin_id = read_simple('admin.txt') or []
 registrated = read_id('registrated.txt') or {}
 user_last_actions = {}
 
+
 class QueueStates(StatesGroup):
     waiting_for_service = State()
     waiting_for_category = State()
     waiting_for_slot = State()
     waiting_for_car_number = State()
+    waiting_for_vehicle_select = State()
+    waiting_for_new_vehicle = State()
     waiting_for_confirm = State()
+
 
 class BanStates(StatesGroup):
     waiting_for_ban_ids = State()
     waiting_for_unban_ids = State()
+
 
 class AboutStates(StatesGroup):
     waiting_for_about_text = State()
     waiting_for_contacts_text = State()
     waiting_for_site_text = State()
 
+
 class BanCheckMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user_id = str(event.from_user.id)
         current_banned = read_simple('banned.txt') or []
         if user_id in current_banned and not (event.text and event.text.startswith('/start')):
-            await event.answer("⛔ Вы забанены.")
+            await event.answer("Вы забанены.")
             return
         return await handler(event, data)
 
+
 dp.message.middleware(BanCheckMiddleware())
+
 
 async def get_back_to_menu_kb():
     kb = [
@@ -428,25 +510,25 @@ async def get_back_to_menu_kb():
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-async def get_user_main_kb_with_repeat(user_id):
+
+async def get_user_main_kb():
     kb = [
         [KeyboardButton(text="Запись в живую очередь")],
         [KeyboardButton(text="Запись на время")],
+        [KeyboardButton(text="Мои автомобили")],
         [KeyboardButton(text="О компании")],
         [KeyboardButton(text="Написать нам")],
         [KeyboardButton(text="История записей")]
     ]
 
-    if user_id in user_last_actions:
-        kb.insert(0, [KeyboardButton(text="🔄 Повторить последнюю запись")])
-
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
 
 async def reminder_scheduler():
     while True:
         try:
             now = datetime.now()
-            await asyncio.sleep(60)
+            await asyncio.sleep(3600)
 
             for user_id, phone in registrated.items():
                 history = get_user_history(user_id)
@@ -468,71 +550,59 @@ async def reminder_scheduler():
                                     except:
                                         continue
 
-                                time_diff = booking_datetime - now
+                                booking_date = booking_datetime.date()
+                                today_date = now.date()
 
-                                if timedelta(minutes=14) <= time_diff <= timedelta(minutes=16):
-                                    try:
-                                        await bot.send_message(
-                                            int(user_id),
-                                            f"🔔 Напоминание!\n\n"
-                                            f"Через 15 минут у вас запись:\n"
-                                            f"Услуга: {booking.get('service_name', 'Н/Д')}\n"
-                                            f"Время: {booking_datetime_str}\n"
-                                            f"Номер талона: {booking.get('ticket_number', 'Н/Д')}\n\n"
-                                            f"Пожалуйста, не опаздывайте!"
-                                        )
-                                        logging.info(f"Reminder sent to user {user_id}")
-                                    except Exception as e:
-                                        logging.error(f"Failed to send reminder: {e}")
+                                if booking_date == today_date:
+                                    reminder_time = booking_datetime - timedelta(hours=2)
+
+                                    if now >= reminder_time and now < booking_datetime:
+                                        reminder_sent_key = f"reminder_sent_{booking.get('booking_id')}"
+                                        if not booking.get(reminder_sent_key):
+                                            try:
+                                                await bot.send_message(
+                                                    int(user_id),
+                                                    f"Напоминание!\n\n"
+                                                    f"Сегодня у вас запись:\n"
+                                                    f"Услуга: {booking.get('service_name', 'Н/Д')}\n"
+                                                    f"Время: {booking_datetime_str}\n"
+                                                    f"Номер талона: {booking.get('ticket_number', 'Н/Д')}\n\n"
+                                                    f"Пожалуйста, не опаздывайте!"
+                                                )
+                                                booking[reminder_sent_key] = True
+                                                save_booking(user_id, booking)
+                                                logging.info(f"Morning reminder sent to user {user_id}")
+                                            except Exception as e:
+                                                logging.error(f"Failed to send reminder: {e}")
                         except Exception as e:
                             logging.error(f"Error processing reminder: {e}")
 
         except Exception as e:
             logging.error(f"Reminder scheduler error: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(3600)
+
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(read('Hi.txt'))
 
+
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     user_id = str(message.from_user.id)
     if user_id in registrated:
-        kb = [
-            [KeyboardButton(text="О компании")],
-            [KeyboardButton(text="Запись в живую очередь")],
-            [KeyboardButton(text="Запись на время")],
-            [KeyboardButton(text="История записей")],
-            [KeyboardButton(text="Написать нам")]
-        ]
-
-        if message.text != "Вернуться в меню":
-            kb.append([KeyboardButton(text="Вернуться в меню")])
-
-        keyboard = ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-        await message.answer("Выберите функцию:", reply_markup=keyboard)
-
+        await message.answer("Выберите функцию:", reply_markup=await get_user_main_kb())
     else:
         contact_button = KeyboardButton(text="Поделиться номером", request_contact=True)
         keyboard = ReplyKeyboardMarkup(keyboard=[[contact_button]], resize_keyboard=True, one_time_keyboard=True)
         await message.answer("Пройдите регистрацию:", reply_markup=keyboard)
+
 
 @dp.message(F.text == "Вернуться в меню")
 async def back_to_menu(message: types.Message, state: FSMContext):
     await state.clear()
     await cmd_help(message)
 
-@dp.message(F.text == "🔄 Повторить последнюю запись")
-async def repeat_last_action(message: types.Message, state: FSMContext):
-    user_id = str(message.from_user.id)
-    if user_id in user_last_actions:
-        last_service_id = user_last_actions[user_id].get("last_service_id")
-        if last_service_id:
-            await message.answer("Повторяем последнюю запись...")
-            await start_booking_time(message, state)
-    else:
-        await message.answer("Нет последней записи для повторения")
 
 @dp.message(F.contact)
 async def handle_contact(message: types.Message):
@@ -540,13 +610,92 @@ async def handle_contact(message: types.Message):
     phone = message.contact.phone_number
     registrated[user_id] = phone
     write('registrated.txt', user_id, phone)
-    await message.answer("✅ Регистрация завершена! Теперь вы можете записываться в очередь.",
-                         reply_markup=await get_user_main_kb_with_repeat(user_id))
+    await message.answer("Регистрация завершена! Теперь вы можете записываться в очередь.",
+                         reply_markup=await get_user_main_kb())
+
+
+@dp.message(F.text == "Мои автомобили")
+async def manage_vehicles(message: types.Message, state: FSMContext):
+    user_id = str(message.from_user.id)
+    vehicles = get_user_vehicles(user_id)
+
+    if not vehicles:
+        await message.answer("У вас пока нет сохраненных автомобилей. Добавьте новый:")
+        await state.set_state(QueueStates.waiting_for_new_vehicle)
+        return
+
+    kb = []
+    for vehicle in vehicles:
+        kb.append([InlineKeyboardButton(
+            text=vehicle.get('number', 'Неизвестно'),
+            callback_data=f"select_vehicle_{vehicle.get('number')}"
+        )])
+
+    kb.append([InlineKeyboardButton(text="Добавить новый автомобиль", callback_data="add_new_vehicle")])
+    kb.append([InlineKeyboardButton(text="Главное меню", callback_data="main_menu")])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
+    await message.answer("Выберите автомобиль:", reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("select_vehicle_"))
+async def select_vehicle(callback: types.CallbackQuery, state: FSMContext):
+    vehicle_number = callback.data.replace("select_vehicle_", "")
+    await state.update_data(selected_vehicle=vehicle_number)
+    await callback.message.edit_text(f"Выбран автомобиль: {vehicle_number}")
+    await asyncio.sleep(1)
+    await callback.message.delete()
+    await cmd_help(callback.message)
+
+
+@dp.callback_query(F.data == "add_new_vehicle")
+async def add_new_vehicle(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Введите государственный номер автомобиля:\nНапример: А123ВВ777 или A123BC777")
+    await state.set_state(QueueStates.waiting_for_new_vehicle)
+
+
+@dp.message(QueueStates.waiting_for_new_vehicle)
+async def process_new_vehicle(message: types.Message, state: FSMContext):
+    if message.text == "Отмена" or message.text == "Вернуться в меню":
+        await state.clear()
+        await cmd_help(message)
+        return
+
+    car_number = message.text.strip().upper()
+
+    if len(car_number) < 5 or len(car_number) > 10:
+        await message.answer("Неверный формат номера. Попробуйте еще раз (например: А123ВВ777):")
+        return
+
+    user_id = str(message.from_user.id)
+    vehicle_data = {
+        "number": car_number,
+        "added_at": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    }
+
+    save_user_vehicle(user_id, vehicle_data)
+    await message.answer(f"Автомобиль {car_number} успешно добавлен!")
+    await state.clear()
+    await cmd_help(message)
+
 
 @dp.message(F.text == "Запись на время")
 async def start_booking_time(message: types.Message, state: FSMContext):
     if str(message.from_user.id) not in registrated:
-        await message.answer("❌ Пройдите регистрацию!")
+        await message.answer("Пройдите регистрацию!")
+        return
+
+    user_id = str(message.from_user.id)
+    active_count = get_user_active_bookings_count(user_id)
+
+    if active_count >= 2:
+        await message.answer("У вас уже есть 2 активные записи. Отмените одну из них, чтобы создать новую.",
+                             reply_markup=await get_back_to_menu_kb())
+        return
+
+    vehicles = get_user_vehicles(user_id)
+    if not vehicles:
+        await message.answer("Сначала добавьте автомобиль в разделе 'Мои автомобили'")
         return
 
     await state.clear()
@@ -558,7 +707,7 @@ async def start_booking_time(message: types.Message, state: FSMContext):
     await loading_msg.delete()
 
     if not services:
-        await message.answer("❌ Не удалось получить список услуг. Попробуйте позже.",
+        await message.answer("Не удалось получить список услуг. Попробуйте позже.",
                              reply_markup=await get_back_to_menu_kb())
         return
 
@@ -579,7 +728,7 @@ async def start_booking_time(message: types.Message, state: FSMContext):
         )])
 
     if not kb:
-        await message.answer("❌ Нет доступных услуг", reply_markup=await get_back_to_menu_kb())
+        await message.answer("Нет доступных услуг", reply_markup=await get_back_to_menu_kb())
         return
 
     kb.append([
@@ -590,6 +739,7 @@ async def start_booking_time(message: types.Message, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
     await message.answer("Выберите услугу для записи:", reply_markup=keyboard)
 
+
 async def show_services(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Загружаю список услуг...")
 
@@ -597,7 +747,7 @@ async def show_services(callback: types.CallbackQuery, state: FSMContext):
 
     if not services:
         await callback.message.edit_text(
-            "❌ Не удалось получить список услуг. Попробуйте позже.",
+            "Не удалось получить список услуг. Попробуйте позже.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="Главное меню", callback_data="main_menu"),
                 InlineKeyboardButton(text="Закрыть", callback_data="cancel_booking")
@@ -624,7 +774,7 @@ async def show_services(callback: types.CallbackQuery, state: FSMContext):
         )])
 
     if not kb:
-        await callback.message.edit_text("❌ Нет доступных услуг")
+        await callback.message.edit_text("Нет доступных услуг")
         return
 
     kb.append([
@@ -635,6 +785,7 @@ async def show_services(callback: types.CallbackQuery, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
     await callback.message.edit_text("Выберите услугу для записи:", reply_markup=keyboard)
 
+
 @dp.callback_query(F.data.startswith("bk_"))
 async def show_categories_or_slots(callback: types.CallbackQuery, state: FSMContext):
     short_id = callback.data.split("_")[1]
@@ -642,7 +793,7 @@ async def show_categories_or_slots(callback: types.CallbackQuery, state: FSMCont
     service_id = data.get(f"svc_{short_id}")
 
     if not service_id:
-        await callback.message.edit_text("❌ Ошибка: услуга не найдена")
+        await callback.message.edit_text("Ошибка: услуга не найдена")
         return
 
     user_id = str(callback.from_user.id)
@@ -676,9 +827,10 @@ async def show_categories_or_slots(callback: types.CallbackQuery, state: FSMCont
                 InlineKeyboardButton(text="Главное меню", callback_data="main_menu")
             ]])
             await callback.message.edit_text(
-                "❌ Нет доступных слотов для этой услуги.",
+                "Нет доступных слотов для этой услуги.",
                 reply_markup=keyboard
             )
+
 
 async def show_categories(callback: types.CallbackQuery, state: FSMContext, service_id: str, categories: list):
     kb = []
@@ -712,23 +864,24 @@ async def show_categories(callback: types.CallbackQuery, state: FSMContext, serv
             InlineKeyboardButton(text="Главное меню", callback_data="main_menu")
         ]])
         await callback.message.edit_text(
-            "❌ Нет доступных категорий",
+            "Нет доступных категорий",
             reply_markup=keyboard
         )
         return
 
     kb.append([
-        InlineKeyboardButton(text="✅ Подтвердить выбор", callback_data="confirm_categories"),
-        InlineKeyboardButton(text="⏭ Пропустить", callback_data="skip_categories")
+        InlineKeyboardButton(text="Подтвердить выбор", callback_data="confirm_categories"),
+        InlineKeyboardButton(text="Пропустить", callback_data="skip_categories")
     ])
 
     kb.append([
-        InlineKeyboardButton(text="◀️ Назад к услугам", callback_data="back_to_services"),
-        InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")
+        InlineKeyboardButton(text="Назад к услугам", callback_data="back_to_services"),
+        InlineKeyboardButton(text="Главное меню", callback_data="main_menu")
     ])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
     await callback.message.edit_text("Выберите категории (можно несколько):", reply_markup=keyboard)
+
 
 @dp.callback_query(F.data.startswith("cat_"))
 async def toggle_category(callback: types.CallbackQuery, state: FSMContext):
@@ -741,10 +894,10 @@ async def toggle_category(callback: types.CallbackQuery, state: FSMContext):
 
     if category_id in selected_categories:
         selected_categories.remove(category_id)
-        await callback.answer(f"Категория удалена")
+        await callback.answer("Категория удалена")
     else:
         selected_categories.append(category_id)
-        await callback.answer(f"Категория добавлена")
+        await callback.answer("Категория добавлена")
 
     await state.update_data(selected_categories=selected_categories)
 
@@ -753,6 +906,7 @@ async def toggle_category(callback: types.CallbackQuery, state: FSMContext):
         await show_categories(callback, state, service_id, categories)
     else:
         await callback.answer("Ошибка загрузки категорий")
+
 
 @dp.callback_query(F.data == "confirm_categories")
 async def confirm_categories(callback: types.CallbackQuery, state: FSMContext):
@@ -773,9 +927,10 @@ async def confirm_categories(callback: types.CallbackQuery, state: FSMContext):
             InlineKeyboardButton(text="Главное меню", callback_data="main_menu")
         ]])
         await callback.message.edit_text(
-            "❌ Нет доступных слотов",
+            "Нет доступных слотов",
             reply_markup=keyboard
         )
+
 
 @dp.callback_query(F.data == "skip_categories")
 async def skip_categories(callback: types.CallbackQuery, state: FSMContext):
@@ -792,37 +947,10 @@ async def skip_categories(callback: types.CallbackQuery, state: FSMContext):
             InlineKeyboardButton(text="Главное меню", callback_data="main_menu")
         ]])
         await callback.message.edit_text(
-            "❌ Нет доступных слотов",
+            "Нет доступных слотов",
             reply_markup=keyboard
         )
 
-@dp.callback_query(F.data.startswith("cat_"))
-async def show_slots_for_category(callback: types.CallbackQuery, state: FSMContext):
-    short_cat_id = callback.data.split("_")[1]
-    data = await state.get_data()
-
-    category_id = data.get(f"cat_{short_cat_id}")
-    service_id = data.get("service_id")
-
-    if not category_id or not service_id:
-        await callback.message.edit_text("❌ Ошибка: данные не найдены")
-        return
-
-    await callback.message.edit_text("Загружаю слоты...")
-
-    slots = api.get_availability_slots(service_id, category_id)
-
-    if slots:
-        await show_slots(callback, state, service_id, slots, category_id)
-    else:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Назад к категориям", callback_data="back_to_categories"),
-            InlineKeyboardButton(text="Главное меню", callback_data="main_menu")
-        ]])
-        await callback.message.edit_text(
-            "❌ Нет доступных слотов для этой категории",
-            reply_markup=keyboard
-        )
 
 async def show_slots(callback: types.CallbackQuery, state: FSMContext, service_id: str, slots: list,
                      category_id: str = None):
@@ -833,7 +961,7 @@ async def show_slots(callback: types.CallbackQuery, state: FSMContext, service_i
             InlineKeyboardButton(text="Главное меню", callback_data="main_menu")
         ]])
         await callback.message.edit_text(
-            "❌ Нет доступных слотов.",
+            "Нет доступных слотов.",
             reply_markup=keyboard
         )
         return
@@ -858,7 +986,7 @@ async def show_slots(callback: types.CallbackQuery, state: FSMContext, service_i
             formatted_date = date
 
         kb.append([InlineKeyboardButton(
-            text=f"─── {formatted_date} ───",
+            text=f"--- {formatted_date} ---",
             callback_data="ignore"
         )])
 
@@ -901,24 +1029,25 @@ async def show_slots(callback: types.CallbackQuery, state: FSMContext, service_i
             InlineKeyboardButton(text="Главное меню", callback_data="main_menu")
         ]])
         await callback.message.edit_text(
-            "❌ Нет доступных слотов.",
+            "Нет доступных слотов.",
             reply_markup=keyboard
         )
         return
 
     nav_buttons = []
     if category_id:
-        nav_buttons.append(InlineKeyboardButton(text="◀️ Назад к категориям", callback_data="back_to_categories"))
+        nav_buttons.append(InlineKeyboardButton(text="Назад к категориям", callback_data="back_to_categories"))
     else:
-        nav_buttons.append(InlineKeyboardButton(text="◀️ Назад к услугам", callback_data="back_to_services"))
+        nav_buttons.append(InlineKeyboardButton(text="Назад к услугам", callback_data="back_to_services"))
 
-    nav_buttons.append(InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"))
-    nav_buttons.append(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_booking"))
+    nav_buttons.append(InlineKeyboardButton(text="Главное меню", callback_data="main_menu"))
+    nav_buttons.append(InlineKeyboardButton(text="Отмена", callback_data="cancel_booking"))
 
     kb.append(nav_buttons)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
-    await callback.message.edit_text("✅ Выберите удобное время:", reply_markup=keyboard)
+    await callback.message.edit_text("Выберите удобное время:", reply_markup=keyboard)
+
 
 @dp.callback_query(F.data.startswith("sl_"))
 async def select_slot(callback: types.CallbackQuery, state: FSMContext):
@@ -939,34 +1068,59 @@ async def select_slot(callback: types.CallbackQuery, state: FSMContext):
         "selected_time": slot_time
     })
 
+    user_id = str(callback.from_user.id)
+    vehicles = get_user_vehicles(user_id)
+
+    if vehicles:
+        kb = []
+        for vehicle in vehicles:
+            kb.append([InlineKeyboardButton(
+                text=vehicle.get('number'),
+                callback_data=f"use_vehicle_{vehicle.get('number')}"
+            )])
+        kb.append([InlineKeyboardButton(text="Добавить новый", callback_data="add_new_vehicle_for_booking")])
+        kb.append([InlineKeyboardButton(text="Отмена", callback_data="cancel_booking")])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
+        await callback.message.edit_text(
+            "Выберите автомобиль для записи:",
+            reply_markup=keyboard
+        )
+        await state.set_state(QueueStates.waiting_for_vehicle_select)
+    else:
+        await callback.message.edit_text(
+            "Введите государственный номер автомобиля:\n"
+            "Например: А123ВВ777 или A123BC777",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Главное меню", callback_data="main_menu"),
+                InlineKeyboardButton(text="Отмена", callback_data="cancel_booking")
+            ]])
+        )
+        await state.set_state(QueueStates.waiting_for_new_vehicle)
+
+
+@dp.callback_query(F.data.startswith("use_vehicle_"))
+async def use_vehicle(callback: types.CallbackQuery, state: FSMContext):
+    vehicle_number = callback.data.replace("use_vehicle_", "")
+    await state.update_data(car_number=vehicle_number)
+    await show_booking_confirmation(callback.message, state)
+
+
+@dp.callback_query(F.data == "add_new_vehicle_for_booking")
+async def add_new_vehicle_for_booking(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "Введите государственный номер автомобиля:\n"
-        "Например: А123ВВ777 или A123BC777\n\n"
-        "Или нажмите кнопку ниже:",
+        "Например: А123ВВ777 или A123BC777",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Главное меню", callback_data="main_menu"),
             InlineKeyboardButton(text="Отмена", callback_data="cancel_booking")
         ]])
     )
-    await state.set_state(QueueStates.waiting_for_car_number)
+    await state.set_state(QueueStates.waiting_for_new_vehicle)
 
-@dp.message(QueueStates.waiting_for_car_number)
-async def process_car_number(message: types.Message, state: FSMContext):
-    if message.text == "Отмена" or message.text == "Вернуться в меню":
-        await state.clear()
-        await message.answer("Операция отменена",
-                             reply_markup=await get_user_main_kb_with_repeat(str(message.from_user.id)))
-        return
 
-    car_number = message.text.strip().upper()
-
-    if len(car_number) < 5 or len(car_number) > 10:
-        cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Отмена")]], resize_keyboard=True)
-        await message.answer("❌ Неверный формат номера. Попробуйте еще раз (например: А123ВВ777):",
-                             reply_markup=cancel_kb)
-        return
-
-    await state.update_data(car_number=car_number)
+async def show_booking_confirmation(message, state: FSMContext):
+    data = await state.get_data()
+    car_number = data.get("car_number")
 
     kb = [
         [
@@ -985,6 +1139,31 @@ async def process_car_number(message: types.Message, state: FSMContext):
     )
     await state.set_state(QueueStates.waiting_for_confirm)
 
+
+@dp.message(QueueStates.waiting_for_new_vehicle)
+async def process_new_vehicle_from_booking(message: types.Message, state: FSMContext):
+    if message.text == "Отмена" or message.text == "Вернуться в меню":
+        await state.clear()
+        await cmd_help(message)
+        return
+
+    car_number = message.text.strip().upper()
+
+    if len(car_number) < 5 or len(car_number) > 10:
+        await message.answer("Неверный формат номера. Попробуйте еще раз (например: А123ВВ777):")
+        return
+
+    user_id = str(message.from_user.id)
+    vehicle_data = {
+        "number": car_number,
+        "added_at": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    }
+
+    save_user_vehicle(user_id, vehicle_data)
+    await state.update_data(car_number=car_number)
+    await show_booking_confirmation(message, state)
+
+
 @dp.callback_query(F.data == "confirm_booking")
 async def confirm_booking(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -999,7 +1178,13 @@ async def confirm_booking(callback: types.CallbackQuery, state: FSMContext):
     selected_time = data.get("selected_time")
 
     if not service_id or not slot_id:
-        await callback.message.edit_text("❌ Ошибка: данные не найдены")
+        await callback.message.edit_text("Ошибка: данные не найдены")
+        await state.clear()
+        return
+
+    active_count = get_user_active_bookings_count(user_id)
+    if active_count >= 2:
+        await callback.message.edit_text("У вас уже есть 2 активные записи. Отмените одну из них, чтобы создать новую.")
         await state.clear()
         return
 
@@ -1075,32 +1260,34 @@ async def confirm_booking(callback: types.CallbackQuery, state: FSMContext):
         asyncio.create_task(notify_admins_about_booking(admin_notification))
 
         msg = (
-            f"✅ Запись подтверждена!\n\n"
-            f"🎫 Номер: {ticket_number}\n"
-            f"📋 Услуга: {service_name}\n"
-            f"📅 Дата и время: {booking_time}\n"
+            f"Запись подтверждена!\n\n"
+            f"Номер: {ticket_number}\n"
+            f"Услуга: {service_name}\n"
+            f"Дата и время: {booking_time}\n"
         )
 
         if car_number:
-            msg += f"🚗 Автомобиль: {car_number}\n"
+            msg += f"Автомобиль: {car_number}\n"
         if selected_categories:
-            msg += f"📌 Категорий выбрано: {len(selected_categories)}\n"
+            msg += f"Категорий выбрано: {len(selected_categories)}\n"
 
-        msg += f"\n⏰ За 15 минут до записи вы получите напоминание."
+        msg += f"\nУтром в день записи вы получите напоминание."
     else:
-        msg = "❌ Ошибка бронирования. Пожалуйста, попробуйте позже."
+        msg = "Ошибка бронирования. Пожалуйста, попробуйте позже."
 
     await callback.message.edit_text(msg)
     await state.clear()
     await callback.message.answer("Что хотите сделать дальше?",
-                                  reply_markup=await get_user_main_kb_with_repeat(user_id))
+                                  reply_markup=await get_user_main_kb())
+
 
 @dp.callback_query(F.data == "cancel_booking")
 async def cancel_booking(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("❌ Бронирование отменено")
+    await callback.message.edit_text("Бронирование отменено")
     await state.clear()
     await callback.message.answer("Что хотите сделать дальше?",
-                                  reply_markup=await get_user_main_kb_with_repeat(str(callback.from_user.id)))
+                                  reply_markup=await get_user_main_kb())
+
 
 @dp.callback_query(F.data == "main_menu")
 async def main_menu_callback(callback: types.CallbackQuery, state: FSMContext):
@@ -1108,10 +1295,12 @@ async def main_menu_callback(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.delete()
     await cmd_help(callback.message)
 
+
 @dp.callback_query(F.data == "back_to_services")
 async def back_to_services(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     await show_services(callback, state)
+
 
 @dp.callback_query(F.data == "back_to_categories")
 async def back_to_categories(callback: types.CallbackQuery, state: FSMContext):
@@ -1127,21 +1316,36 @@ async def back_to_categories(callback: types.CallbackQuery, state: FSMContext):
 
     await back_to_services(callback, state)
 
+
 @dp.callback_query(F.data == "ignore")
 async def ignore_callback(callback: types.CallbackQuery):
     await callback.answer()
 
+
 @dp.message(F.text == "Запись в живую очередь")
 async def start_live_queue(message: types.Message, state: FSMContext):
     if str(message.from_user.id) not in registrated:
-        await message.answer("❌ Пройдите регистрацию!")
+        await message.answer("Пройдите регистрацию!")
+        return
+
+    user_id = str(message.from_user.id)
+    active_count = get_user_active_bookings_count(user_id)
+
+    if active_count >= 2:
+        await message.answer("У вас уже есть 2 активные записи. Отмените одну из них, чтобы создать новую.",
+                             reply_markup=await get_back_to_menu_kb())
+        return
+
+    vehicles = get_user_vehicles(user_id)
+    if not vehicles:
+        await message.answer("Сначала добавьте автомобиль в разделе 'Мои автомобили'")
         return
 
     await state.clear()
 
     services = api.get_services()
     if not services:
-        await message.answer("❌ Ошибка связи с сервером.", reply_markup=await get_back_to_menu_kb())
+        await message.answer("Ошибка связи с сервером.", reply_markup=await get_back_to_menu_kb())
         return
 
     kb = []
@@ -1161,7 +1365,7 @@ async def start_live_queue(message: types.Message, state: FSMContext):
         )])
 
     if not kb:
-        await message.answer("❌ Нет доступных услуг", reply_markup=await get_back_to_menu_kb())
+        await message.answer("Нет доступных услуг", reply_markup=await get_back_to_menu_kb())
         return
 
     kb.append([
@@ -1172,6 +1376,7 @@ async def start_live_queue(message: types.Message, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
     await message.answer("Выберите услугу для живой очереди:", reply_markup=keyboard)
 
+
 @dp.callback_query(F.data.startswith("lv_"))
 async def process_live_queue(callback: types.CallbackQuery, state: FSMContext):
     short_id = callback.data.split("_")[1]
@@ -1180,13 +1385,51 @@ async def process_live_queue(callback: types.CallbackQuery, state: FSMContext):
     user_id = str(callback.from_user.id)
 
     if not service_id:
-        await callback.message.edit_text("❌ Ошибка: услуга не найдена")
+        await callback.message.edit_text("Ошибка: услуга не найдена")
         return
 
     user_last_actions[user_id] = {
         "last_service_id": service_id,
         "last_service_name": callback.message.text
     }
+
+    active_count = get_user_active_bookings_count(user_id)
+    if active_count >= 2:
+        await callback.message.edit_text("У вас уже есть 2 активные записи. Отмените одну из них, чтобы создать новую.")
+        await state.clear()
+        return
+
+    vehicles = get_user_vehicles(user_id)
+    if not vehicles:
+        await callback.message.edit_text("Сначала добавьте автомобиль в разделе 'Мои автомобили'")
+        return
+
+    await state.update_data(service_id=service_id)
+
+    kb = []
+    for vehicle in vehicles:
+        kb.append([InlineKeyboardButton(
+            text=vehicle.get('number'),
+            callback_data=f"live_vehicle_{vehicle.get('number')}"
+        )])
+    kb.append([InlineKeyboardButton(text="Добавить новый", callback_data="add_new_vehicle_for_live")])
+    kb.append([InlineKeyboardButton(text="Отмена", callback_data="cancel_booking")])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
+    await callback.message.edit_text(
+        "Выберите автомобиль:",
+        reply_markup=keyboard
+    )
+
+
+@dp.callback_query(F.data.startswith("live_vehicle_"))
+async def process_live_queue_with_vehicle(callback: types.CallbackQuery, state: FSMContext):
+    vehicle_number = callback.data.replace("live_vehicle_", "")
+    await state.update_data(car_number=vehicle_number)
+
+    data = await state.get_data()
+    service_id = data.get("service_id")
+    user_id = str(callback.from_user.id)
 
     await callback.message.edit_text("Регистрирую...")
 
@@ -1222,6 +1465,7 @@ async def process_live_queue(callback: types.CallbackQuery, state: FSMContext):
             "queue_position": wait_time.get('queue_ahead', 5) + 1,
             "wait_time": wait_time.get('wait_time_minutes', 15),
             "created_at": created_at,
+            "car_number": vehicle_number,
             "status": "в очереди",
             "saved_at": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         }
@@ -1235,38 +1479,53 @@ async def process_live_queue(callback: types.CallbackQuery, state: FSMContext):
             "ticket_number": ticket_number,
             "queue_position": wait_time.get('queue_ahead', 5) + 1,
             "wait_time": wait_time.get('wait_time_minutes', 15),
+            "car_number": vehicle_number,
             "type": "live"
         }
         asyncio.create_task(notify_admins_about_booking(admin_notification))
 
         msg = (
-            f"✅ Вы зарегистрированы в живую очередь!\n\n"
-            f"🎫 Номер талона: {ticket_number}\n"
-            f"📋 Услуга: {service_name}\n"
-            f"👥 Позиция: {wait_time.get('queue_ahead', 5) + 1}\n"
-            f"⏱ Время ожидания: ~{wait_time.get('wait_time_minutes', 15)} мин.\n"
-            f"🕐 Время регистрации: {created_at}\n\n"
+            f"Вы зарегистрированы в живую очередь!\n\n"
+            f"Номер талона: {ticket_number}\n"
+            f"Услуга: {service_name}\n"
+            f"Автомобиль: {vehicle_number}\n"
+            f"Позиция: {wait_time.get('queue_ahead', 5) + 1}\n"
+            f"Время ожидания: ~{wait_time.get('wait_time_minutes', 15)} мин.\n"
+            f"Время регистрации: {created_at}\n\n"
             "Пожалуйста, ожидайте приглашения."
         )
     else:
-        msg = "❌ Ошибка регистрации. Пожалуйста, попробуйте позже."
+        msg = "Ошибка регистрации. Пожалуйста, попробуйте позже."
 
     await callback.message.edit_text(msg)
     await state.clear()
     await callback.message.answer("Что хотите сделать дальше?",
-                                  reply_markup=await get_user_main_kb_with_repeat(user_id))
+                                  reply_markup=await get_user_main_kb())
+
+
+@dp.callback_query(F.data == "add_new_vehicle_for_live")
+async def add_new_vehicle_for_live(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Введите государственный номер автомобиля:\n"
+        "Например: А123ВВ777 или A123BC777",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Отмена", callback_data="cancel_booking")
+        ]])
+    )
+    await state.set_state(QueueStates.waiting_for_new_vehicle)
+
 
 @dp.message(F.text == "История записей")
 async def booking_history(message: types.Message):
     if str(message.from_user.id) not in registrated:
-        await message.answer("❌ Пройдите регистрацию!")
+        await message.answer("Пройдите регистрацию!")
         return
 
     user_id = str(message.from_user.id)
     history = get_user_history(user_id)
 
     if not history:
-        await message.answer("📭 У вас пока нет записей.", reply_markup=await get_back_to_menu_kb())
+        await message.answer("У вас пока нет записей.", reply_markup=await get_back_to_menu_kb())
         return
 
     history.sort(key=lambda x: x.get('saved_at', x.get('created_at', '')), reverse=True)
@@ -1280,57 +1539,57 @@ async def booking_history(message: types.Message):
         else:
             completed.append(item)
 
-    text = "📋 ВАША ИСТОРИЯ ЗАПИСЕЙ\n\n"
+    text = "ВАША ИСТОРИЯ ЗАПИСЕЙ\n\n"
 
     if active:
-        text += "🔴 АКТИВНЫЕ ЗАПИСИ:\n"
-        text += "─" * 30 + "\n"
+        text += "АКТИВНЫЕ ЗАПИСИ:\n"
+        text += "-" * 30 + "\n"
         for i, item in enumerate(active[:5], 1):
             if item['type'] == 'живая_очередь':
                 text += (
-                    f"{i}. 🎫 Номер: {item['ticket_number']}\n"
-                    f"   📋 Услуга: {item['service_name']}\n"
-                    f"   👥 Позиция: {item['queue_position']}\n"
-                    f"   ⏱ Ожидание: ~{item['wait_time']} мин\n"
+                    f"{i}. Номер: {item['ticket_number']}\n"
+                    f"   Услуга: {item['service_name']}\n"
+                    f"   Авто: {item.get('car_number', 'Не указан')}\n"
+                    f"   Позиция: {item['queue_position']}\n"
+                    f"   Ожидание: ~{item['wait_time']} мин\n"
                 )
             else:
                 text += (
-                    f"{i}. 🎫 Номер: {item['ticket_number']}\n"
-                    f"   📋 Услуга: {item['service_name']}\n"
-                    f"   📅 Дата: {item['date_time']}\n"
+                    f"{i}. Номер: {item['ticket_number']}\n"
+                    f"   Услуга: {item['service_name']}\n"
+                    f"   Авто: {item.get('car_number', 'Не указан')}\n"
+                    f"   Дата: {item['date_time']}\n"
                 )
-                if item.get('car_number'):
-                    text += f"   🚗 Авто: {item['car_number']}\n"
                 if item.get('categories') and len(item['categories']) > 0:
-                    text += f"   📌 Категорий: {len(item['categories'])}\n"
-            text += f"   ────────────────────────\n"
+                    text += f"   Категорий: {len(item['categories'])}\n"
+            text += f"   ------------------------\n"
 
     if completed:
         if active:
             text += "\n"
-        text += "⚪ ЗАВЕРШЁННЫЕ/ОТМЕНЁННЫЕ:\n"
-        text += "─" * 30 + "\n"
+        text += "ЗАВЕРШЁННЫЕ/ОТМЕНЁННЫЕ:\n"
+        text += "-" * 30 + "\n"
         for i, item in enumerate(completed[:5], 1):
-            text += f"{i}. 🎫 {item['ticket_number']} - {item['service_name']} ({item['status']})\n"
-            text += f"   ────────────────────────\n"
+            text += f"{i}. {item['ticket_number']} - {item['service_name']} ({item['status']})\n"
+            text += f"   ------------------------\n"
 
     kb = []
     for i, item in enumerate(active[:5]):
-        if item['type'] == 'запись_на_время':
-            kb.append([InlineKeyboardButton(
-                text=f"❌ Отменить запись {i + 1}",
-                callback_data=f"cancel_{item['booking_id']}"
-            )])
+        kb.append([InlineKeyboardButton(
+            text=f"Отменить запись {i + 1}",
+            callback_data=f"cancel_{item['booking_id']}"
+        )])
 
-    kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_history")])
-    kb.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")])
+    kb.append([InlineKeyboardButton(text="Обновить", callback_data="refresh_history")])
+    kb.append([InlineKeyboardButton(text="Главное меню", callback_data="main_menu")])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=kb) if kb else InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_history"),
-        InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")
+        InlineKeyboardButton(text="Обновить", callback_data="refresh_history"),
+        InlineKeyboardButton(text="Главное меню", callback_data="main_menu")
     ]])
 
     await message.answer(text, reply_markup=keyboard)
+
 
 @dp.callback_query(F.data.startswith("cancel_"))
 async def cancel_booking_request(callback: types.CallbackQuery):
@@ -1338,33 +1597,65 @@ async def cancel_booking_request(callback: types.CallbackQuery):
 
     kb = [
         [
-            InlineKeyboardButton(text="✅ Да", callback_data=f"confirm_cancel_{booking_id}"),
-            InlineKeyboardButton(text="❌ Нет", callback_data="refresh_history")
+            InlineKeyboardButton(text="Да", callback_data=f"confirm_cancel_{booking_id}"),
+            InlineKeyboardButton(text="Нет", callback_data="refresh_history")
         ]
     ]
     keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
 
     await callback.message.edit_text(
-        "❓ Вы уверены, что хотите отменить запись?",
+        "Вы уверены, что хотите отменить запись?",
         reply_markup=keyboard
     )
+
 
 @dp.callback_query(F.data.startswith("confirm_cancel_"))
 async def confirm_cancel_booking(callback: types.CallbackQuery):
     booking_id = callback.data.replace("confirm_cancel_", "")
     user_id = str(callback.from_user.id)
 
-    if cancel_booking(user_id, booking_id):
-        await callback.message.edit_text("✅ Запись успешно отменена!")
+    success, cancelled_booking = cancel_booking(user_id, booking_id)
+
+    if success and cancelled_booking:
+        await callback.message.edit_text("Запись успешно отменена!")
+
+        user_phone = registrated.get(user_id)
+        try:
+            user = await bot.get_chat(int(user_id))
+            user_name = user.full_name or user.username or 'Неизвестно'
+        except:
+            user_name = 'Неизвестно'
+
+        admin_notification = {
+            "user_id": user_id,
+            "user_name": user_name,
+            "phone": user_phone,
+            "service_name": cancelled_booking.get('service_name', 'Неизвестно'),
+            "ticket_number": cancelled_booking.get('ticket_number', 'Неизвестно'),
+            "type": "cancelled",
+            "booking_type": cancelled_booking.get('type', 'неизвестно'),
+            "cancelled_at": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        }
+
+        if cancelled_booking.get('car_number'):
+            admin_notification["car_number"] = cancelled_booking.get('car_number')
+        if cancelled_booking.get('date_time'):
+            admin_notification["datetime"] = cancelled_booking.get('date_time')
+        if cancelled_booking.get('queue_position'):
+            admin_notification["queue_position"] = cancelled_booking.get('queue_position')
+
+        asyncio.create_task(notify_admins_about_cancellation(admin_notification))
     else:
-        await callback.message.edit_text("❌ Ошибка при отмене записи.")
+        await callback.message.edit_text("Ошибка при отмене записи.")
 
     await asyncio.sleep(2)
     await booking_history(callback.message)
 
+
 @dp.callback_query(F.data == "refresh_history")
 async def refresh_history(callback: types.CallbackQuery):
     await booking_history(callback.message)
+
 
 async def notify_admins_about_booking(booking_info: dict):
     global admin_id
@@ -1380,29 +1671,29 @@ async def notify_admins_about_booking(booking_info: dict):
                     user_name = 'Неизвестно'
 
             msg = (
-                f"🔔 НОВАЯ ЗАПИСЬ!\n\n"
-                f"👤 Пользователь: {user_name}\n"
-                f"🆔 ID: {booking_info.get('user_id')}\n"
-                f"📞 Телефон: {booking_info.get('phone')}\n"
-                f"📋 Услуга: {booking_info.get('service_name')}\n"
-                f"🎫 Номер талона: {booking_info.get('ticket_number')}\n"
+                f"НОВАЯ ЗАПИСЬ!\n\n"
+                f"Пользователь: {user_name}\n"
+                f"ID: {booking_info.get('user_id')}\n"
+                f"Телефон: {booking_info.get('phone')}\n"
+                f"Услуга: {booking_info.get('service_name')}\n"
+                f"Номер талона: {booking_info.get('ticket_number')}\n"
             )
 
             if booking_info.get('car_number'):
-                msg += f"🚗 Автомобиль: {booking_info.get('car_number')}\n"
+                msg += f"Автомобиль: {booking_info.get('car_number')}\n"
 
             if booking_info.get('categories') and len(booking_info.get('categories', [])) > 0:
-                msg += f"📌 Категорий выбрано: {len(booking_info.get('categories', []))}\n"
+                msg += f"Категорий выбрано: {len(booking_info.get('categories', []))}\n"
 
             if booking_info.get('type') == 'live':
-                msg += f"👥 Тип: Живая очередь\n"
-                msg += f"📊 Позиция: {booking_info.get('queue_position')}\n"
-                msg += f"⏱ Ожидание: ~{booking_info.get('wait_time')} мин\n"
+                msg += f"Тип: Живая очередь\n"
+                msg += f"Позиция: {booking_info.get('queue_position')}\n"
+                msg += f"Ожидание: ~{booking_info.get('wait_time')} мин\n"
             else:
-                msg += f"📅 Тип: Запись на время\n"
-                msg += f"📅 Дата и время: {booking_info.get('datetime')}\n"
+                msg += f"Тип: Запись на время\n"
+                msg += f"Дата и время: {booking_info.get('datetime')}\n"
 
-            msg += f"\n🕐 Запись создана: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+            msg += f"\nЗапись создана: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
 
             await bot.send_message(int(admin), msg)
             logging.info(f"Notification sent to admin {admin}")
@@ -1410,15 +1701,53 @@ async def notify_admins_about_booking(booking_info: dict):
         except Exception as e:
             logging.error(f"Failed to notify admin {admin}: {e}")
 
+
+async def notify_admins_about_cancellation(cancel_info: dict):
+    global admin_id
+
+    for admin in admin_id:
+        try:
+            msg = (
+                f"ЗАПИСЬ ОТМЕНЕНА!\n\n"
+                f"Пользователь: {cancel_info.get('user_name', 'Неизвестно')}\n"
+                f"ID: {cancel_info.get('user_id')}\n"
+                f"Телефон: {cancel_info.get('phone')}\n"
+                f"Услуга: {cancel_info.get('service_name')}\n"
+                f"Номер талона: {cancel_info.get('ticket_number')}\n"
+            )
+
+            if cancel_info.get('car_number'):
+                msg += f"Автомобиль: {cancel_info.get('car_number')}\n"
+
+            if cancel_info.get('booking_type') == 'живая_очередь':
+                msg += f"Тип: Живая очередь\n"
+                if cancel_info.get('queue_position'):
+                    msg += f"Позиция: {cancel_info.get('queue_position')}\n"
+            else:
+                msg += f"Тип: Запись на время\n"
+                if cancel_info.get('datetime'):
+                    msg += f"Дата и время: {cancel_info.get('datetime')}\n"
+
+            msg += f"\nОтменена: {cancel_info.get('cancelled_at')}"
+
+            await bot.send_message(int(admin), msg)
+            logging.info(f"Cancellation notification sent to admin {admin}")
+
+        except Exception as e:
+            logging.error(f"Failed to send cancellation notification to admin {admin}: {e}")
+
+
 @dp.message(F.text == "О компании")
 async def about(message: types.Message):
     s = read('Abot.txt') or "Информация о компании"
     await message.answer(s, reply_markup=await get_back_to_menu_kb())
 
+
 @dp.message(F.text == "Написать нам")
 async def contact_us(message: types.Message):
-    s = read('contacts.txt') or "Контакты: info@company.ru"
-    await message.answer(s, reply_markup=await get_back_to_menu_kb())
+    admin_contacts = read('contacts.txt') or "Контакты для связи отсутствуют"
+    await message.answer(admin_contacts, reply_markup=await get_back_to_menu_kb())
+
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -1428,13 +1757,15 @@ async def cmd_admin(message: types.Message):
             [types.KeyboardButton(text="Ограничение доступа")],
             [types.KeyboardButton(text="Отправить сообщение")],
             [types.KeyboardButton(text="Редактировать 'О компании'")],
+            [types.KeyboardButton(text="Редактировать контакты")],
             [types.KeyboardButton(text="Меню пользователя")]
         ]
         keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
         await message.answer("Админ-панель:", reply_markup=keyboard)
     else:
-        await message.answer('⛔ Нет прав')
+        await message.answer('Нет прав')
         await cmd_help(message)
+
 
 @dp.message(F.text == "Ограничение доступа")
 async def ban_menu(message: types.Message):
@@ -1451,6 +1782,7 @@ async def ban_menu(message: types.Message):
     keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
     await message.answer("Управление бан-листом:", reply_markup=keyboard)
 
+
 @dp.message(F.text == "Добавить бан")
 async def add_ban_start(message: types.Message, state: FSMContext):
     user_id = str(message.from_user.id)
@@ -1466,12 +1798,13 @@ async def add_ban_start(message: types.Message, state: FSMContext):
     await state.set_state(BanStates.waiting_for_ban_ids)
     await state.update_data(banned_ids=[])
 
+
 @dp.message(BanStates.waiting_for_ban_ids)
 async def process_ban_ids(message: types.Message, state: FSMContext):
     user_input = message.text.strip()
 
     if user_input.lower() == "отмена":
-        await message.answer("❌ Отменено", reply_markup=await get_admin_keyboard())
+        await message.answer("Отменено", reply_markup=await get_admin_keyboard())
         await state.clear()
         return
 
@@ -1485,7 +1818,7 @@ async def process_ban_ids(message: types.Message, state: FSMContext):
                 if uid not in admin_id:
                     write_id('banned.txt', uid)
                     success += 1
-            await message.answer(f"✅ Забанено: {success}", reply_markup=await get_admin_keyboard())
+            await message.answer(f"Забанено: {success}", reply_markup=await get_admin_keyboard())
         else:
             await message.answer("Нет ID", reply_markup=await get_admin_keyboard())
 
@@ -1507,7 +1840,8 @@ async def process_ban_ids(message: types.Message, state: FSMContext):
         await message.answer(f"В списке: {len(banned_ids)}\nВведите ещё или 'Готово'")
 
     except:
-        await message.answer("❌ Ошибка. Введите ID")
+        await message.answer("Ошибка. Введите ID")
+
 
 @dp.message(F.text == "Список забаненных")
 async def list_banned(message: types.Message):
@@ -1523,6 +1857,7 @@ async def list_banned(message: types.Message):
 
     await message.answer(text)
 
+
 @dp.message(F.text == "Снять бан")
 async def unban_menu(message: types.Message):
     user_id = str(message.from_user.id)
@@ -1531,70 +1866,72 @@ async def unban_menu(message: types.Message):
 
     await message.answer("Функция в разработке")
 
+
 @dp.message(F.text == "Редактировать 'О компании'")
 async def edit_about_menu(message: types.Message):
     user_id = str(message.from_user.id)
     if user_id not in admin_id:
         return
 
-    kb = [
-        [types.KeyboardButton(text="О нас")],
-        [types.KeyboardButton(text="Контакты")],
-        [types.KeyboardButton(text="Назад")]
-    ]
-    keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-    await message.answer("Что редактировать?", reply_markup=keyboard)
+    await message.answer("Отправьте новый текст для раздела 'О компании':")
+    await AboutStates.waiting_for_about_text
 
-@dp.message(F.text == "О нас")
-async def edit_about_us(message: types.Message, state: FSMContext):
-    current = read('Abot.txt') or "Текст не установлен"
-    await message.answer(f"Текущий текст:\n{current}\n\nОтправьте новый текст:")
-    await state.set_state(AboutStates.waiting_for_about_text)
 
 @dp.message(AboutStates.waiting_for_about_text)
 async def save_about_us(message: types.Message, state: FSMContext):
     with open('Abot.txt', 'w', encoding='utf-8') as f:
         f.write(message.text)
-    await message.answer("✅ Сохранено", reply_markup=await get_admin_keyboard())
+    await message.answer("Сохранено", reply_markup=await get_admin_keyboard())
     await state.clear()
 
-@dp.message(F.text == "Контакты")
-async def edit_contacts(message: types.Message, state: FSMContext):
-    current = read('contacts.txt') or "Текст не установлен"
-    await message.answer(f"Текущий текст:\n{current}\n\nОтправьте новый текст:")
-    await state.set_state(AboutStates.waiting_for_contacts_text)
+
+@dp.message(F.text == "Редактировать контакты")
+async def edit_contacts_menu(message: types.Message):
+    user_id = str(message.from_user.id)
+    if user_id not in admin_id:
+        return
+
+    await message.answer("Отправьте новый текст для раздела 'Написать нам':")
+    await AboutStates.waiting_for_contacts_text
+
 
 @dp.message(AboutStates.waiting_for_contacts_text)
 async def save_contacts(message: types.Message, state: FSMContext):
     with open('contacts.txt', 'w', encoding='utf-8') as f:
         f.write(message.text)
-    await message.answer("✅ Сохранено", reply_markup=await get_admin_keyboard())
+    await message.answer("Сохранено", reply_markup=await get_admin_keyboard())
     await state.clear()
+
 
 @dp.message(F.text == "Меню пользователя")
 @dp.message(F.text == "Назад")
 async def back_to_user(message: types.Message):
     await cmd_help(message)
 
+
 async def get_admin_keyboard():
     kb = [
         [types.KeyboardButton(text="Ограничение доступа")],
         [types.KeyboardButton(text="Отправить сообщение")],
         [types.KeyboardButton(text="Редактировать 'О компании'")],
+        [types.KeyboardButton(text="Редактировать контакты")],
         [types.KeyboardButton(text="Меню пользователя")]
     ]
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
 
 @dp.message()
 async def echo_handler(message: types.Message):
     if message.contact:
         return
-    await message.answer(f"❓ {message.text}")
+    await message.answer(f"{message.text}")
+
 
 async def main():
     asyncio.create_task(reminder_scheduler())
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
