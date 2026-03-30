@@ -43,6 +43,13 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 PROXY_URL = "http://147.161.210.140:8800"
 
+def is_registered(user_id: str) -> bool:
+    registrated_data = read_id('registrated.txt') or {}
+    return user_id in registrated_data
+
+def get_user_phone(user_id: str) -> str:
+    registrated_data = read_id('registrated.txt') or {}
+    return registrated_data.get(user_id)
 
 def save_booking(user_id: str, booking_data: dict):
     try:
@@ -190,6 +197,24 @@ def get_user_vehicles(user_id: str):
         logging.error(f"Error loading vehicles: {e}")
         return []
 
+def get_registered_users():
+    return read_id('registrated.txt') or {}
+
+def is_user_registered(user_id: str) -> bool:
+    users = get_registered_users()
+    return user_id in users
+
+def get_user_phone(user_id: str) -> str:
+    users = get_registered_users()
+    return users.get(user_id)
+
+def register_user(user_id: str, phone: str):
+    users = get_registered_users()
+    if user_id not in users:
+        users[user_id] = phone
+        write('registrated.txt', user_id, phone)
+        return True
+    return False
 
 class QueueClient:
     def __init__(self, token: str, host: str = "http://api.qms.kn-k.ru"):
@@ -221,11 +246,12 @@ class QueueClient:
                 return None
 
             if response.status_code == 404:
-                logging.error(f"Endpoint not found: {endpoint}")
+                logging.error(f"API logic error - endpoint not found: {endpoint}")
+                logging.error(f"Response: {response.text[:500] if response.text else 'No response body'}")
                 return None
 
             if response.status_code == 400:
-                logging.error(f"Bad request: {response.text[:200]}")
+                logging.error(f"Bad request: {response.text[:500]}")
                 return None
 
             if response.status_code == 200:
@@ -469,7 +495,6 @@ admin_id = read_simple('admin.txt') or []
 registrated = read_id('registrated.txt') or {}
 user_last_actions = {}
 
-
 class QueueStates(StatesGroup):
     waiting_for_service = State()
     waiting_for_category = State()
@@ -478,7 +503,7 @@ class QueueStates(StatesGroup):
     waiting_for_vehicle_select = State()
     waiting_for_new_vehicle = State()
     waiting_for_confirm = State()
-
+    waiting_for_message = State()
 
 class BanStates(StatesGroup):
     waiting_for_ban_ids = State()
@@ -520,7 +545,6 @@ async def get_user_main_kb():
         [KeyboardButton(text="Написать нам")],
         [KeyboardButton(text="История записей")]
     ]
-
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 
@@ -530,7 +554,9 @@ async def reminder_scheduler():
             now = datetime.now()
             await asyncio.sleep(3600)
 
-            for user_id, phone in registrated.items():
+            users = get_registered_users()
+
+            for user_id, phone in users.items():
                 history = get_user_history(user_id)
 
                 if not history:
@@ -577,6 +603,7 @@ async def reminder_scheduler():
                         except Exception as e:
                             logging.error(f"Error processing reminder: {e}")
 
+
         except Exception as e:
             logging.error(f"Reminder scheduler error: {e}")
             await asyncio.sleep(3600)
@@ -590,7 +617,8 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     user_id = str(message.from_user.id)
-    if user_id in registrated:
+
+    if is_user_registered(user_id):
         await message.answer("Выберите функцию:", reply_markup=await get_user_main_kb())
     else:
         contact_button = KeyboardButton(text="Поделиться номером", request_contact=True)
@@ -608,8 +636,12 @@ async def back_to_menu(message: types.Message, state: FSMContext):
 async def handle_contact(message: types.Message):
     user_id = str(message.from_user.id)
     phone = message.contact.phone_number
-    registrated[user_id] = phone
-    write('registrated.txt', user_id, phone)
+
+    if is_user_registered(user_id):
+        await message.answer("Вы уже зарегистрированы!", reply_markup=await get_user_main_kb())
+        return
+
+    register_user(user_id, phone)
     await message.answer("Регистрация завершена! Теперь вы можете записываться в очередь.",
                          reply_markup=await get_user_main_kb())
 
@@ -681,11 +713,12 @@ async def process_new_vehicle(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "Запись на время")
 async def start_booking_time(message: types.Message, state: FSMContext):
-    if str(message.from_user.id) not in registrated:
+    user_id = str(message.from_user.id)
+
+    if not is_user_registered(user_id):
         await message.answer("Пройдите регистрацию!")
         return
 
-    user_id = str(message.from_user.id)
     active_count = get_user_active_bookings_count(user_id)
 
     if active_count >= 2:
@@ -788,6 +821,8 @@ async def show_services(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("bk_"))
 async def show_categories_or_slots(callback: types.CallbackQuery, state: FSMContext):
+    user_id = str(callback.from_user.id)
+
     short_id = callback.data.split("_")[1]
     data = await state.get_data()
     service_id = data.get(f"svc_{short_id}")
@@ -796,7 +831,6 @@ async def show_categories_or_slots(callback: types.CallbackQuery, state: FSMCont
         await callback.message.edit_text("Ошибка: услуга не найдена")
         return
 
-    user_id = str(callback.from_user.id)
     user_last_actions[user_id] = {
         "last_service_id": service_id,
         "last_service_name": callback.message.text
@@ -1171,7 +1205,7 @@ async def confirm_booking(callback: types.CallbackQuery, state: FSMContext):
     slot_id = data.get("selected_slot")
     car_number = data.get("car_number")
     selected_categories = data.get("selected_categories", [])
-    user_phone = registrated.get(str(callback.from_user.id))
+    user_phone = get_user_phone(str(callback.from_user.id))
     user_id = str(callback.from_user.id)
 
     selected_date = data.get("selected_date")
@@ -1282,7 +1316,7 @@ async def confirm_booking(callback: types.CallbackQuery, state: FSMContext):
 
 
 @dp.callback_query(F.data == "cancel_booking")
-async def cancel_booking(callback: types.CallbackQuery, state: FSMContext):
+async def cancel_booking_callback(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Бронирование отменено")
     await state.clear()
     await callback.message.answer("Что хотите сделать дальше?",
@@ -1297,13 +1331,13 @@ async def main_menu_callback(callback: types.CallbackQuery, state: FSMContext):
 
 
 @dp.callback_query(F.data == "back_to_services")
-async def back_to_services(callback: types.CallbackQuery, state: FSMContext):
+async def back_to_services_callback(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     await show_services(callback, state)
 
 
 @dp.callback_query(F.data == "back_to_categories")
-async def back_to_categories(callback: types.CallbackQuery, state: FSMContext):
+async def back_to_categories_callback(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
     service_id = data.get("service_id")
@@ -1314,7 +1348,7 @@ async def back_to_categories(callback: types.CallbackQuery, state: FSMContext):
             await show_categories(callback, state, service_id, categories)
             return
 
-    await back_to_services(callback, state)
+    await back_to_services_callback(callback, state)
 
 
 @dp.callback_query(F.data == "ignore")
@@ -1324,11 +1358,12 @@ async def ignore_callback(callback: types.CallbackQuery):
 
 @dp.message(F.text == "Запись в живую очередь")
 async def start_live_queue(message: types.Message, state: FSMContext):
-    if str(message.from_user.id) not in registrated:
+    user_id = str(message.from_user.id)
+
+    if not is_user_registered(user_id):
         await message.answer("Пройдите регистрацию!")
         return
 
-    user_id = str(message.from_user.id)
     active_count = get_user_active_bookings_count(user_id)
 
     if active_count >= 2:
@@ -1379,10 +1414,11 @@ async def start_live_queue(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("lv_"))
 async def process_live_queue(callback: types.CallbackQuery, state: FSMContext):
+    user_id = str(callback.from_user.id)
+
     short_id = callback.data.split("_")[1]
     data = await state.get_data()
     service_id = data.get(f"svc_{short_id}")
-    user_id = str(callback.from_user.id)
 
     if not service_id:
         await callback.message.edit_text("Ошибка: услуга не найдена")
@@ -1433,7 +1469,7 @@ async def process_live_queue_with_vehicle(callback: types.CallbackQuery, state: 
 
     await callback.message.edit_text("Регистрирую...")
 
-    user_phone = registrated.get(user_id)
+    user_phone = get_user_phone(user_id)
 
     additional_data = {
         "selected_categories": []
@@ -1517,11 +1553,12 @@ async def add_new_vehicle_for_live(callback: types.CallbackQuery, state: FSMCont
 
 @dp.message(F.text == "История записей")
 async def booking_history(message: types.Message):
-    if str(message.from_user.id) not in registrated:
+    user_id = str(message.from_user.id)
+
+    if not is_user_registered(user_id):
         await message.answer("Пройдите регистрацию!")
         return
 
-    user_id = str(message.from_user.id)
     history = get_user_history(user_id)
 
     if not history:
@@ -1918,6 +1955,57 @@ async def get_admin_keyboard():
         [types.KeyboardButton(text="Меню пользователя")]
     ]
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
+@dp.message(F.text == "Отправить сообщение")
+async def send_broadcast_menu(message: types.Message, state: FSMContext):
+    user_id = str(message.from_user.id)
+    if user_id not in admin_id:
+        return
+
+    await message.answer(
+        "Введите сообщение для рассылки:\n\n"
+        "Для отмены введите 'Отмена'"
+    )
+    await state.set_state(QueueStates.waiting_for_message)
+    await state.update_data(broadcast=True)
+
+
+@dp.message(QueueStates.waiting_for_message)
+async def process_broadcast(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    is_broadcast = data.get("broadcast", False)
+
+    if not is_broadcast:
+        return
+
+    if message.text == "Отмена":
+        await state.clear()
+        await message.answer("Рассылка отменена", reply_markup=await get_admin_keyboard())
+        return
+
+    await message.answer("Начинаю рассылку...")
+
+    success = 0
+    failed = 0
+
+    users = get_registered_users()
+
+    for user_id in users.keys():
+        try:
+            await bot.send_message(
+                int(user_id),
+                f"Сообщение от администрации:\n\n{message.text}"
+            )
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            failed += 1
+            logging.error(f"Failed to send broadcast to {user_id}: {e}")
+
+    await message.answer(f"Рассылка завершена:\nУспешно: {success}\nОшибок: {failed}")
+    await state.clear()
+    await cmd_admin(message)
 
 
 @dp.message()
